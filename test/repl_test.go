@@ -378,7 +378,7 @@ func BenchmarkDelBigObj(b *testing.B) {
 }
 
 // 删除大量对象
-func BenchmarkDelManyObj(b *testing.B) {
+func TestDelManyObj(T *testing.T) {
 	lredis.ReadConfig("../config.yaml")
 	log.Print("=================================\n")
 	clients, err := lredis.Open()
@@ -489,7 +489,6 @@ func gzipDecode(input []byte) ([]byte, error) {
 // proto_data相比raw_data减少20.46%
 // gzip_data相比raw_data增大6.78%
 // gzip_data相比json_data减少0.3%, 采用最佳压缩比0.8%
-
 func TestRedisCompressData(t *testing.T) {
 	lredis.ReadConfig("../config.yaml")
 	clients, err := lredis.Open()
@@ -595,6 +594,114 @@ func TestRedisCompressData(t *testing.T) {
 		return
 	}
 	log.Println("===========redis end set gzip_data===========")
+}
+
+// 使用整数对象内存对比，在使用lru内存策略时，整数对象共享池([1,9999]的数字)内每个对象的lru字段
+// 也会被共享，不能确定每个对象的最后访问时间，不能被回收。
+// 127.0.0.1:6379设置maxmemory-policy=noeviction, maxmemory=500M 可以使用共享内存对象
+// 127.0.0.1:6380设置maxmemory-policy=allkeys-lru, maxmemory=500M 不可以使用共享内存对象
+// 分别插入100万条正整数数据，查看内存限制
+// 关闭aof、屏蔽持久化影响
+
+// 插入 100 * 9998 条数据，127.0.0.1:6379 占用used_memory_human:54.80M
+// 插入 100 * 9998 条数据，127.0.0.1:6380 占用used_memory_human:70.04M
+// 在string，key-value 使用共享整数对象比不使用节约内存21.7%
+func TestRedisIntSharePool(t *testing.T) {
+	lredis.ReadConfig("../config.yaml")
+	clients, err := lredis.Open()
+	tag := "redis share data"
+	if err != nil {
+		log.Fatalf("%s open redis err: %s", tag, err.Error())
+		return
+	}
+
+	intNum := 100 // 需要插入的最外层循环
+	// 共享整数对象池[1, 9999]
+
+	// minNum := 1
+	maxNum := 9998
+	client1 := clients[0]
+	pipe1 := client1.Pipeline()
+	defer pipe1.Close()
+
+	client2 := clients[1]
+	pipe2 := client2.Pipeline()
+	defer pipe2.Close()
+
+	log.Println("===========redis int share start===========")
+	for times := 0; times < intNum; times++ {
+		for i := 0; i < maxNum; i++ {
+			key := fmt.Sprintf("list_%d_%d", times, i)
+			num := rand.Intn(maxNum) + 1
+			pipe1.Set(key, num, 0)
+			pipe2.Set(key, num, 0)
+		}
+		// 配置不淘汰内存 触发maxmemory 错误
+		// 插入大量数据时发生阻塞
+		if _, err := pipe1.Exec(); err != nil {
+			log.Printf("127.0.0.1:6379 err: %s", err.Error())
+		}
+
+		if _, err := pipe2.Exec(); err != nil {
+			log.Printf("127.0.0.1:6380 err: %s", err.Error())
+		}
+
+		time.Sleep(1 * time.Millisecond)
+	}
+	log.Println("===========redis int share end===========")
+}
+
+// 在复杂数据结构中，如list中使用
+// 127.0.0.1:6379 内存占用73.70M
+// 127.0.0.1:6380 内存占用73.68M
+// list中整数共享对象没有节约内存
+func TestRedisIntSharePoolInList(t *testing.T) {
+	lredis.ReadConfig("../config.yaml")
+	clients, err := lredis.Open()
+	tag := "redis share data"
+	if err != nil {
+		log.Fatalf("%s open redis err: %s", tag, err.Error())
+		return
+	}
+
+	intNum := 100 // 需要插入的最外层循环
+	// 共享整数对象池[1, 9999]
+
+	// minNum := 1
+	maxNum := 9998
+	client1 := clients[0]
+	pipe1 := client1.Pipeline()
+	defer pipe1.Close()
+
+	client2 := clients[1]
+	pipe2 := client2.Pipeline()
+	defer pipe2.Close()
+
+	log.Println("===========redis int share in list start===========")
+	for times := 0; times < intNum; times++ {
+		key := fmt.Sprintf("list_%d", times)
+		values := make([]interface{}, maxNum)
+		for i := 0; i < maxNum; i++ {
+			num := rand.Intn(maxNum) + 1
+			values[i] = num
+		}
+
+		pipe1.LPush(key, values...)
+		pipe2.LPush(key, values...)
+
+		// 配置不淘汰内存 触发maxmemory 错误
+		// 插入大量数据时发生阻塞
+		if _, err := pipe1.Exec(); err != nil {
+			log.Printf("127.0.0.1:6379 err: %s", err.Error())
+		}
+
+		if _, err := pipe2.Exec(); err != nil {
+			log.Printf("127.0.0.1:6380 err: %s", err.Error())
+		}
+
+		time.Sleep(1 * time.Millisecond)
+	}
+	log.Println("===========redis int share in list end===========")
 }
 
 // linux 相关命令
