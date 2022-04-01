@@ -1,9 +1,12 @@
 package test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	lredis "learn/l_redis"
+	"learn/l_redis/api_go"
 	"log"
 	"math/rand"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis"
+	"google.golang.org/protobuf/proto"
 )
 
 // redis 主从同步大量数据
@@ -395,6 +399,202 @@ func BenchmarkDelManyObj(b *testing.B) {
 		log.Fatalf("del many obj redis err: %s", err.Error())
 		return
 	}
+}
+
+// 内存管理缩减值对象大小
+// 1 完整描述业务场景下-尽量缩减键长度
+// 2 值长度如果无特殊需求可以把数据转换为二进制编码（测试原始数据、使用json、测试普通二进制、转换为probuf存储压缩比、使用gzip压缩的json的空间占比)
+// 3 从业务上精简对象去除必要的存储数据
+
+func getPersionData(index int) *api_go.Persion {
+	score := time.Now().UnixNano()
+	name := fmt.Sprintf("%d--%d--", index, score)
+	return &api_go.Persion{
+		Name:        name,
+		Age:         int32(index),
+		Salary:      float32(score),
+		Addr:        "仙女座星系团银河系-银河系-太阳系-地球-中国-北京-回龙观",
+		Description: "人生不相见，动如参与商⑵。\n今夕复何夕，共此灯烛光。",
+	}
+}
+
+func protoEncode(data proto.Message) ([]byte, error) {
+	return proto.Marshal(data)
+}
+
+func protoDecode(data []byte, item proto.Message) error {
+	return proto.Unmarshal(data, item)
+}
+
+func gzipEncode(input []byte) ([]byte, error) {
+	// 创建一个新的 byte 输出流
+	var buf bytes.Buffer
+	// 创建一个新的 gzip 输出流
+	gzipWriter, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	// 将 input byte 数组写入到此输出流中
+	_, err := gzipWriter.Write(input)
+	if err != nil {
+		_ = gzipWriter.Close()
+		return nil, err
+	}
+	if err := gzipWriter.Close(); err != nil {
+		return nil, err
+	}
+	// 返回压缩后的 bytes 数组
+	return buf.Bytes(), nil
+}
+
+func gzipDecode(input []byte) ([]byte, error) {
+	// 创建一个新的 gzip.Reader
+	bytesReader := bytes.NewReader(input)
+	gzipReader, err := gzip.NewReader(bytesReader)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		// defer 中关闭 gzipReader
+		_ = gzipReader.Close()
+	}()
+	buf := new(bytes.Buffer)
+	// 从 Reader 中读取出数据
+	if _, err := buf.ReadFrom(gzipReader); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// 测试redis使用不同编码的数据存储情况
+// 加入4万条数据，list格式，总共占用增加19MB
+
+// 各编码占用redis内存如下：
+// 运行memory usage key samples 10000 查看每个符合结构预估的占用内存大小，
+// samples 后边为采样个数，memory usage 为key名称
+// list名称      占用memory
+// rwadata      2460899B=2.35mb
+// byte_data    9086784B=8.67mb
+// proto_data   1989348B=1.897mb
+// json_data    2680894B=2.556mb
+// gzip_data    2665454B=2.54mb
+
+// 上述测试和理论结果不相符，改进直接存储二进制格式
+// list名称      占用memory
+// rwadata      2501285B=2.37mb
+// byte_data    2501285B=2.37mb
+// proto_data   1989348B=1.897mb
+// json_data    2680894B=2.556mb
+// gzip_data    2671059B=2.5473mb
+
+// 在golang中存储二进制和原始数据大小相同，这是go语言特性决定，[]byte和string类型占用相同
+// json_data相比raw_data增大7.18%
+// proto_data相比raw_data减少20.46%
+// gzip_data相比raw_data增大6.78%
+// gzip_data相比json_data减少0.3%, 采用最佳压缩比0.8%
+
+func TestRedisCompressData(t *testing.T) {
+	lredis.ReadConfig("../config.yaml")
+	clients, err := lredis.Open()
+	tag := "redis compress data"
+	if err != nil {
+		log.Fatalf("%s open redis err: %s", tag, err.Error())
+		return
+	}
+	client := clients[0]
+	log.Printf("clients len %d", len(clients))
+	pipe := client.Pipeline()
+	dataNumber := 10000
+	defer func(p redis.Pipeliner) {
+		p.Close()
+	}(pipe)
+
+	log.Println("===========redis start set rawdata===========")
+	rowValues := make([]interface{}, dataNumber)
+	for index := 0; index < dataNumber; index++ {
+		rowValues[index] = fmt.Sprintf("%v", getPersionData(index))
+	}
+	pipe.LPush("rawdata", rowValues...)
+	_, err = pipe.Exec()
+	if err != nil {
+		log.Fatalf("redis set rawdata err: %s", err.Error())
+		return
+	}
+	log.Println("===========redis end set rawdata===========")
+
+	log.Println("===========redis start set byte_data===========")
+	byteValues := make([]interface{}, dataNumber)
+	for index := 0; index < dataNumber; index++ {
+		persion := getPersionData(index)
+		byteValues[index] = []byte(fmt.Sprintf("%v", persion))
+	}
+	pipe.LPush("byte_data", byteValues...)
+	_, err = pipe.Exec()
+	if err != nil {
+		log.Fatalf("redis set byte_data err: %s", err.Error())
+		return
+	}
+	log.Println("===========redis end set byte_data===========")
+
+	log.Println("===========redis start set proto_data===========")
+	protoValues := make([]interface{}, dataNumber)
+	for index := 0; index < dataNumber; index++ {
+		persion := getPersionData(index)
+		data, err := protoEncode(persion)
+		if err != nil {
+			log.Fatalf("proto marshal err: %s", err.Error())
+			return
+		}
+		protoValues[index] = data
+	}
+	pipe.LPush("proto_data", protoValues...)
+	_, err = pipe.Exec()
+	if err != nil {
+		log.Fatalf("redis set proto_data err: %s", err.Error())
+		return
+	}
+	log.Println("===========redis end set proto_data===========")
+
+	log.Println("===========redis start set json_data===========")
+	jsonValues := make([]interface{}, dataNumber)
+	for index := 0; index < dataNumber; index++ {
+		persion := getPersionData(index)
+		data, err := json.Marshal(persion)
+		if err != nil {
+			log.Fatalf("json marshal err: %s", err.Error())
+			return
+		}
+		jsonValues[index] = data
+	}
+	pipe.LPush("json_data", jsonValues...)
+	_, err = pipe.Exec()
+	if err != nil {
+		log.Fatalf("redis set json_data err: %s", err.Error())
+		return
+	}
+	log.Println("===========redis end set json_data===========")
+
+	log.Println("===========redis start set gzip_data===========")
+	gzipValues := make([]interface{}, dataNumber)
+	for index := 0; index < dataNumber; index++ {
+		persion := getPersionData(index)
+		data, err := json.Marshal(persion)
+		if err != nil {
+			log.Fatalf("json marshal err: %s", err.Error())
+			return
+		}
+
+		data, err = gzipEncode(data)
+		if err != nil {
+			log.Fatalf("gzip encode err: %s", err.Error())
+			return
+		}
+		gzipValues[index] = data
+	}
+	pipe.LPush("gzip_data", gzipValues...)
+	_, err = pipe.Exec()
+	if err != nil {
+		log.Fatalf("redis set gzip_data err: %s", err.Error())
+		return
+	}
+	log.Println("===========redis end set gzip_data===========")
 }
 
 // linux 相关命令

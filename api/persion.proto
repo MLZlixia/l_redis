@@ -1,0 +1,11 @@
+syntax = "proto3";
+package api;
+option go_package=".;api_go";
+
+message Persion {
+    string name = 1;
+    int32 age =2;
+    float salary=3;
+    string addr =4;
+    string description=5;
+}

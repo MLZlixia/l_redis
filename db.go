@@ -92,7 +92,6 @@ func Open() ([]redis.Cmdable, error) {
 	for index, host := range hosts {
 		log.Printf("open db host %s \n", host)
 		var client redis.Cmdable
-
 		if redisConfig.DBMod == singleInsMod {
 			client = redis.NewClient(&redis.Options{
 				Addr:         host,
@@ -105,9 +104,7 @@ func Open() ([]redis.Cmdable, error) {
 				IdleTimeout:  redisConfig.IdleTime,
 				MaxConnAge:   redisConfig.LifeTime,
 			})
-		}
-
-		if redisConfig.DBMod == clusterMod {
+		} else if redisConfig.DBMod == clusterMod {
 			client = redis.NewClusterClient(&redis.ClusterOptions{
 				Addrs:        []string{host},
 				Password:     redisConfig.Password,
