@@ -9,3 +9,11 @@ message Persion {
     string addr =4;
     string description=5;
 }
+
+message Video {
+    int64 id = 1;
+    string title = 2;
+    string videoURL =3;
+    int64  playlist=4;
+    int64 playtime=5;
+}

@@ -68,7 +68,9 @@ func batchWriteData(client redis.Cmdable, datas []*Data) error {
 	defer pipe.Close()
 	for i := 0; i < len(datas); i++ {
 		data := datas[i]
-		pipe.Set(data.Key, data.Value, 0)
+		if data != nil {
+			pipe.Set(data.Key, data.Value, 0)
+		}
 	}
 
 	if _, err := pipe.Exec(); err != nil {
@@ -352,7 +354,9 @@ func batchWriteHash(client redis.Cmdable, datas []*HashData) error {
 	pipe := client.Pipeline()
 	defer pipe.Close()
 	for _, hashData := range datas {
-		pipe.HMSet(hashData.Key, hashData.Value)
+		if hashData != nil {
+			pipe.HMSet(hashData.Key, hashData.Value)
+		}
 	}
 	if _, err := pipe.Exec(); err != nil {
 		return err
